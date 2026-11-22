@@ -91,6 +91,20 @@ def password():
         sys.exit("No Gmail app password: set GMAIL_APP_PASSWORD or Keychain 'gmail-app-password-bahrain'.")
 
 
+def send_retry(conn, m):
+    """Send; if Gmail dropped or expired the connection (421), reconnect once and resend."""
+    try:
+        conn.send_message(m); return conn
+    except (smtplib.SMTPServerDisconnected, smtplib.SMTPResponseException) as e:
+        if isinstance(e, smtplib.SMTPResponseException) and e.smtp_code != 421:
+            raise
+        try:
+            conn.quit()
+        except Exception:
+            pass
+        conn = smtp(); conn.send_message(m); return conn
+
+
 def smtp():
     s = smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=60)
     s.login(CFG["from_email"], password())
@@ -211,9 +225,7 @@ def cmd_send(dry=False, limit=None):
             (out / f"{r['id']}.eml").write_bytes(bytes(m))
             print("DRY", r["id"]); done.append(r); continue
         try:
-            conn.send_message(m)
-        except smtplib.SMTPServerDisconnected:
-            conn = smtp(); conn.send_message(m)
+            conn = send_retry(conn, m)
         except Exception as e:
             r["note"] = f"send error: {type(e).__name__}"; print("ERR", r["id"], type(e).__name__); continue
         r["status"], r["sent_at"], r["message_id"] = "sent", now(), m["Message-ID"]
@@ -240,7 +252,10 @@ def cmd_followup(dry=False):
         m = build_followup(r)
         if dry:
             print("DRY followup", r["id"]); done.append(r); continue
-        conn.send_message(m)
+        try:
+            conn = send_retry(conn, m)
+        except Exception as e:
+            print("ERR followup", r["id"], type(e).__name__); continue
         r["followup_at"] = now(); r["status"] = "followed_up"
         log(f"| {r['followup_at']} | {r['id']} | {r['firm']} | {r['to']} | follow-up |")
         save(rows); done.append(r)
