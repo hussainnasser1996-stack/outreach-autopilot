@@ -1,0 +1,62 @@
+name: Outreach autopilot
+
+on:
+  schedule:
+    # 08:00 KSA (05:00 UTC); 06:30 and 08:00 UTC are catch-ups if GitHub runs the first one late.
+    # The daily stamp (state/last_daily.txt) stops a second run on the same day.
+    - cron: "0 5 * * *"
+    - cron: "30 6 * * *"
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "daily | selftest | status | inbox"
+        default: "daily"
+        required: true
+      force:
+        description: "Run daily even if it already ran today (true/false)"
+        default: "false"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: outreach-autopilot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Open private data
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: bash scripts/vault.sh open
+      - name: Run
+        env:
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          CMD: ${{ github.event.inputs.command || 'daily' }}
+          FORCE: ${{ github.event.inputs.force || 'false' }}
+        run: |
+          mkdir -p logs
+          if [ "$CMD" = "daily" ] && [ "$FORCE" = "true" ]; then
+            python scripts/outreach.py daily --force | tee -a logs/run.log
+          else
+            python scripts/outreach.py "$CMD" | tee -a logs/run.log
+          fi
+      - name: Save queue state
+        if: always()
+        run: |
+          git config user.name "outreach-autopilot"
+          git config user.email "actions@users.noreply.github.com"
+          STATE_KEY="${{ secrets.STATE_KEY }}" bash scripts/vault.sh seal
+          git add private.tar.enc state/last_daily.txt
+          if git diff --cached --quiet; then echo "no state change"; exit 0; fi
+          git commit -m "autopilot: ${{ github.event.inputs.command || 'daily' }} $(date -u +%F)"
+          for i in 1 2 3; do git pull --rebase -q && git push -q && break; sleep 5; done
